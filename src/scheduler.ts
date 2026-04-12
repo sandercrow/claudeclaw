@@ -1,6 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 
-import { AGENT_ID, ALLOWED_CHAT_ID, agentMcpAllowlist } from './config.js';
+import { AGENT_ID, ALLOWED_CHAT_ID, PRIMARY_CHAT_ID, agentMcpAllowlist } from './config.js';
 import {
   getDueTasks,
   getSession,
@@ -83,7 +83,7 @@ async function runDueTasks(): Promise<void> {
     // Route through the message queue so scheduled tasks wait for any
     // in-flight user message to finish before running. This prevents
     // two Claude processes from hitting the same session simultaneously.
-    const chatId = ALLOWED_CHAT_ID || 'scheduler';
+    const chatId = PRIMARY_CHAT_ID || 'scheduler';
     messageQueue.enqueue(chatId, async () => {
       const abortController = new AbortController();
       const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
@@ -109,9 +109,9 @@ async function runDueTasks(): Promise<void> {
 
         // Inject task output into the active chat session so user replies have context
         if (ALLOWED_CHAT_ID) {
-          const activeSession = getSession(ALLOWED_CHAT_ID, schedulerAgentId);
-          logConversationTurn(ALLOWED_CHAT_ID, 'user', `[Scheduled task]: ${task.prompt}`, activeSession ?? undefined, schedulerAgentId);
-          logConversationTurn(ALLOWED_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
+          const activeSession = getSession(PRIMARY_CHAT_ID, schedulerAgentId);
+          logConversationTurn(PRIMARY_CHAT_ID, 'user', `[Scheduled task]: ${task.prompt}`, activeSession ?? undefined, schedulerAgentId);
+          logConversationTurn(PRIMARY_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
         }
 
         updateTaskAfterRun(task.id, nextRun, text, 'success');
@@ -148,7 +148,7 @@ async function runDueMissionTasks(): Promise<void> {
 
   logger.info({ missionId: mission.id, title: mission.title }, 'Running mission task');
 
-  const chatId = ALLOWED_CHAT_ID || 'mission';
+  const chatId = PRIMARY_CHAT_ID || 'mission';
   messageQueue.enqueue(chatId, async () => {
     const abortController = new AbortController();
     const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
@@ -173,9 +173,9 @@ async function runDueMissionTasks(): Promise<void> {
 
         // Inject into conversation context so agent can reference it
         if (ALLOWED_CHAT_ID) {
-          const activeSession = getSession(ALLOWED_CHAT_ID, schedulerAgentId);
-          logConversationTurn(ALLOWED_CHAT_ID, 'user', '[Mission task: ' + mission.title + ']: ' + mission.prompt, activeSession ?? undefined, schedulerAgentId);
-          logConversationTurn(ALLOWED_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
+          const activeSession = getSession(PRIMARY_CHAT_ID, schedulerAgentId);
+          logConversationTurn(PRIMARY_CHAT_ID, 'user', '[Mission task: ' + mission.title + ']: ' + mission.prompt, activeSession ?? undefined, schedulerAgentId);
+          logConversationTurn(PRIMARY_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
         }
       }
 

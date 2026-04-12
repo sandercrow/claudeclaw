@@ -9,6 +9,7 @@ import {
   ALLOWED_CHAT_ID,
   ALLOWED_CHAT_IDS,
   ALLOWED_GROUP_IDS,
+  PRIMARY_CHAT_ID,
   CONTEXT_LIMIT,
   DASHBOARD_PORT,
   DASHBOARD_TOKEN,
@@ -118,7 +119,9 @@ const AVAILABLE_MODELS: Record<string, string> = {
 const DEFAULT_MODEL_LABEL = 'opus';
 
 export function setMainModelOverride(model: string): void {
-  if (ALLOWED_CHAT_ID) chatModelOverride.set(ALLOWED_CHAT_ID, model);
+  for (const id of ALLOWED_CHAT_IDS) {
+    chatModelOverride.set(id, model);
+  }
 }
 
 // WhatsApp state per Telegram chat
@@ -797,7 +800,7 @@ export function createBot(): Bot {
   if (ALLOWED_CHAT_ID) {
     setHighImportanceCallback((memoryId, summary, importance) => {
       const msg = `🧠 New memory #${memoryId} [${importance.toFixed(1)}]: ${summary.slice(0, 200)}\n\n/pin ${memoryId} to make permanent`;
-      bot.api.sendMessage(ALLOWED_CHAT_ID, msg).catch(() => {});
+      bot.api.sendMessage(PRIMARY_CHAT_ID, msg).catch(() => {});
     });
   }
 
@@ -1668,7 +1671,7 @@ export async function notifyWhatsAppIncoming(
   const text = `📱 <b>${escapeHtml(origin)}</b> — new message\n<i>/wa to view &amp; reply</i>`;
 
   try {
-    await api.sendMessage(parseInt(ALLOWED_CHAT_ID), text, { parse_mode: 'HTML' });
+    await api.sendMessage(parseInt(PRIMARY_CHAT_ID), text, { parse_mode: 'HTML' });
   } catch (err) {
     logger.error({ err }, 'Failed to send WhatsApp notification');
   }

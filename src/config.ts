@@ -68,6 +68,10 @@ export const ALLOWED_CHAT_IDS: ReadonlySet<string> = new Set(
   ALLOWED_CHAT_ID.split(',').map((s) => s.trim()).filter(Boolean),
 );
 
+// The first chat ID is the primary -- used for notifications, scheduler results, etc.
+export const PRIMARY_CHAT_ID: string =
+  ALLOWED_CHAT_ID.split(',')[0]?.trim() || '';
+
 // Telegram group IDs where the bot is allowed to operate (comma-separated).
 // Bot only responds when @mentioned or replied to in groups.
 const rawGroupIds = process.env.ALLOWED_GROUP_IDS || envConfig.ALLOWED_GROUP_IDS || '';

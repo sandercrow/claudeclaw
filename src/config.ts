@@ -7,6 +7,7 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'TELEGRAM_BOT_TOKEN',
   'ALLOWED_CHAT_ID',
+  'ALLOWED_GROUP_IDS',
   'GROQ_API_KEY',
   'ELEVENLABS_API_KEY',
   'ELEVENLABS_VOICE_ID',
@@ -58,8 +59,21 @@ export const TELEGRAM_BOT_TOKEN =
   process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
 
 // Only respond to this Telegram chat ID. Set this after getting your ID via /chatid.
+// Supports comma-separated IDs for multi-user access (e.g. "123,456").
 export const ALLOWED_CHAT_ID =
   process.env.ALLOWED_CHAT_ID || envConfig.ALLOWED_CHAT_ID || '';
+
+// Parsed set of allowed private chat IDs for O(1) lookup.
+export const ALLOWED_CHAT_IDS: ReadonlySet<string> = new Set(
+  ALLOWED_CHAT_ID.split(',').map((s) => s.trim()).filter(Boolean),
+);
+
+// Telegram group IDs where the bot is allowed to operate (comma-separated).
+// Bot only responds when @mentioned or replied to in groups.
+const rawGroupIds = process.env.ALLOWED_GROUP_IDS || envConfig.ALLOWED_GROUP_IDS || '';
+export const ALLOWED_GROUP_IDS: ReadonlySet<string> = new Set(
+  rawGroupIds.split(',').map((s) => s.trim()).filter(Boolean),
+);
 
 export const WHATSAPP_ENABLED =
   (process.env.WHATSAPP_ENABLED || envConfig.WHATSAPP_ENABLED || '').toLowerCase() === 'true';

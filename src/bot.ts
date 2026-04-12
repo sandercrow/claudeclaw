@@ -7,6 +7,8 @@ import { runAgent, UsageInfo, AgentProgressEvent } from './agent.js';
 import {
   AGENT_ID,
   ALLOWED_CHAT_ID,
+  ALLOWED_CHAT_IDS,
+  ALLOWED_GROUP_IDS,
   CONTEXT_LIMIT,
   DASHBOARD_PORT,
   DASHBOARD_TOKEN,
@@ -297,7 +299,7 @@ async function sendTyping(api: Api<RawApi>, chatId: number): Promise<void> {
 }
 
 /**
- * Authorise the incoming chat against ALLOWED_CHAT_ID.
+ * Authorise the incoming chat against ALLOWED_CHAT_ID (private) or ALLOWED_GROUP_IDS (groups).
  * If ALLOWED_CHAT_ID is not yet configured, guide the user to set it up.
  * Returns true if the message should be processed.
  */
@@ -306,7 +308,12 @@ function isAuthorised(chatId: number): boolean {
     // Not yet configured — let every request through but warn in the reply handler
     return true;
   }
-  return chatId.toString() === ALLOWED_CHAT_ID;
+  const id = chatId.toString();
+  // Check private chat IDs
+  if (ALLOWED_CHAT_IDS.has(id)) return true;
+  // Check group IDs (negative numbers in Telegram)
+  if (ALLOWED_GROUP_IDS.has(id)) return true;
+  return false;
 }
 
 /**
@@ -740,13 +747,46 @@ export function createBot(): Bot {
 
   const bot = new Bot(token);
 
-  // Reject group chats. ClaudeClaw only works in private (1-on-1) chats.
-  // This prevents message leakage if the bot is added to a group.
+  // Group chat gate: allow authorised groups, reject unknown ones.
+  // In allowed groups the bot only responds when @mentioned or replied to.
   bot.use(async (ctx, next) => {
     if (ctx.chat && ctx.chat.type !== 'private') {
-      logger.warn({ chatId: ctx.chat.id, type: ctx.chat.type }, 'Rejected non-private chat');
-      await ctx.reply('This bot only works in private chats.').catch(() => {});
-      return;
+      const groupId = ctx.chat.id.toString();
+      if (!ALLOWED_GROUP_IDS.has(groupId)) {
+        logger.warn({ chatId: ctx.chat.id, type: ctx.chat.type }, 'Rejected non-authorised group chat');
+        await ctx.reply('This bot only works in authorised chats.').catch(() => {});
+        return;
+      }
+      // Allowed group — check if bot was mentioned or replied to.
+      // Commands (starting with /) always pass through.
+      const text = ctx.message?.text || ctx.message?.caption || '';
+      const isCommand = text.startsWith('/');
+      const botInfo = ctx.me;
+      const isMentioned = botInfo?.username
+        ? text.toLowerCase().includes(`@${botInfo.username.toLowerCase()}`)
+        : false;
+      const isReplyToBot = ctx.message?.reply_to_message?.from?.id === botInfo?.id;
+
+      if (!isCommand && !isMentioned && !isReplyToBot) {
+        // Silently ignore — don't respond to every group message
+        return;
+      }
+
+      // Strip the @mention from the text so Claude doesn't see it as part of the prompt
+      if (isMentioned && ctx.message?.text && botInfo?.username) {
+        const mentionRegex = new RegExp(`@${botInfo.username}\\b`, 'gi');
+        const msg = ctx.message as unknown as { text: string };
+        msg.text = ctx.message.text.replace(mentionRegex, '').trim();
+      }
+
+      // Tag the message with group context so the agent knows who's talking
+      const sender = ctx.from;
+      if (sender && ctx.message?.text) {
+        const name = sender.first_name + (sender.last_name ? ` ${sender.last_name}` : '');
+        const chatTitle = 'title' in ctx.chat ? (ctx.chat as { title?: string }).title : undefined;
+        const msg = ctx.message as unknown as { text: string };
+        msg.text = `[Group: ${chatTitle || groupId}] [From: ${name}] ${ctx.message.text}`;
+      }
     }
     await next();
   });

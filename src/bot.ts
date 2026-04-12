@@ -760,26 +760,15 @@ export function createBot(): Bot {
         await ctx.reply('This bot only works in authorised chats.').catch(() => {});
         return;
       }
-      // Allowed group — check if bot was mentioned or replied to.
-      // Commands (starting with /) always pass through.
-      const text = ctx.message?.text || ctx.message?.caption || '';
-      const isCommand = text.startsWith('/');
+      // Allowed group — all messages pass through (no @mention required).
+      // Strip @mention from text if present so Claude gets a clean prompt.
       const botInfo = ctx.me;
-      const isMentioned = botInfo?.username
-        ? text.toLowerCase().includes(`@${botInfo.username.toLowerCase()}`)
-        : false;
-      const isReplyToBot = ctx.message?.reply_to_message?.from?.id === botInfo?.id;
-
-      if (!isCommand && !isMentioned && !isReplyToBot) {
-        // Silently ignore — don't respond to every group message
-        return;
-      }
-
-      // Strip the @mention from the text so Claude doesn't see it as part of the prompt
-      if (isMentioned && ctx.message?.text && botInfo?.username) {
+      if (botInfo?.username && ctx.message?.text) {
         const mentionRegex = new RegExp(`@${botInfo.username}\\b`, 'gi');
-        const msg = ctx.message as unknown as { text: string };
-        msg.text = ctx.message.text.replace(mentionRegex, '').trim();
+        if (mentionRegex.test(ctx.message.text)) {
+          const msg = ctx.message as unknown as { text: string };
+          msg.text = ctx.message.text.replace(mentionRegex, '').trim();
+        }
       }
 
       // Tag the message with group context so the agent knows who's talking

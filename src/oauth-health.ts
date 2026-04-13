@@ -52,6 +52,14 @@ async function checkOAuthHealth(sender: Sender): Promise<void> {
   const creds = readCredentials();
 
   if (!creds?.claudeAiOauth?.expiresAt) {
+    // No credentials file found. This is expected when using setup-token auth
+    // or other non-file-based auth methods. Only alert if this is unexpected
+    // (i.e. we previously had a healthy token that disappeared).
+    if (lastAlertLevel === 'none') {
+      // Never had a token in this session - likely using alternative auth, stay quiet
+      logger.debug('No credentials file found, likely using setup-token or alternative auth');
+      return;
+    }
     if (lastAlertLevel !== 'expired') {
       lastAlertLevel = 'expired';
       await sender(

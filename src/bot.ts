@@ -438,6 +438,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
   if (delegation) {
     setProcessing(chatIdStr, true);
     await sendTyping(ctx.api, chatId);
+    const delegationProgressIds: number[] = [];
     try {
       const delegationResult = await delegateToAgent(
         delegation.agentId,
@@ -446,9 +447,14 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
         AGENT_ID,
         (progressMsg) => {
           emitChatEvent({ type: 'progress', chatId: chatIdStr, description: progressMsg });
-          void ctx.reply(progressMsg).catch(() => {});
+          ctx.reply(progressMsg).then((sent) => delegationProgressIds.push(sent.message_id)).catch(() => {});
         },
       );
+
+      // Clean up delegation progress messages
+      for (const msgId of delegationProgressIds) {
+        try { await ctx.api.deleteMessage(chatId, msgId); } catch { /* best effort */ }
+      }
 
       const response = delegationResult.text?.trim() || 'Agent completed with no output.';
       const header = `[${delegationResult.agentId} — ${Math.round(delegationResult.durationMs / 1000)}s]`;
@@ -511,14 +517,19 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     let lastToolNotifyTime = 0;
     let lastToolDesc = '';
     const TOOL_NOTIFY_INTERVAL_MS = 30_000;
+    const progressMsgIds: number[] = [];
+
+    const trackProgressMsg = (promise: Promise<{ message_id: number }>) => {
+      promise.then((sent) => progressMsgIds.push(sent.message_id)).catch(() => {});
+    };
 
     const onProgress = (event: AgentProgressEvent) => {
       if (event.type === 'task_started') {
         emitChatEvent({ type: 'progress', chatId: chatIdStr, description: event.description });
-        void ctx.reply(`🔄 ${event.description}`).catch(() => {});
+        trackProgressMsg(ctx.reply(`🔄 ${event.description}`));
       } else if (event.type === 'task_completed') {
         emitChatEvent({ type: 'progress', chatId: chatIdStr, description: event.description });
-        void ctx.reply(`✓ ${event.description}`).catch(() => {});
+        trackProgressMsg(ctx.reply(`✓ ${event.description}`));
       } else if (event.type === 'tool_active') {
         emitChatEvent({ type: 'progress', chatId: chatIdStr, description: event.description });
         lastToolDesc = event.description;
@@ -528,7 +539,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
           const now = Date.now();
           if (now - lastToolNotifyTime >= TOOL_NOTIFY_INTERVAL_MS) {
             lastToolNotifyTime = now;
-            void ctx.reply(`⚙️ ${event.description}...`).catch(() => {});
+            trackProgressMsg(ctx.reply(`⚙️ ${event.description}...`));
           }
         }
       }
@@ -591,6 +602,11 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     // Clean up the streaming placeholder before sending the final formatted response
     if (streamMsgId) {
       try { await ctx.api.deleteMessage(chatId, streamMsgId); } catch { /* best effort */ }
+    }
+
+    // Clean up progress messages (⚙️ 🔄 ✓) now that the agent is done
+    for (const msgId of progressMsgIds) {
+      try { await ctx.api.deleteMessage(chatId, msgId); } catch { /* best effort */ }
     }
 
     // Handle abort (manual /stop or timeout)

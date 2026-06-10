@@ -21,7 +21,7 @@ import { emitChatEvent } from './state.js';
 type Sender = (text: string) => Promise<void>;
 
 /** Max time (ms) a scheduled task can run before being killed. */
-const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const TASK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 let sender: Sender;
 

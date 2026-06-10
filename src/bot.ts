@@ -30,6 +30,7 @@ import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } fro
 import { setHighImportanceCallback } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
+import { reapAgentSubprocesses } from './process-reaper.js';
 import { emitChatEvent, setProcessing, setActiveAbort, abortActiveQuery } from './state.js';
 import {
   isLocked,
@@ -553,6 +554,15 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     const timeoutId = setTimeout(() => {
       logger.warn({ chatId: chatIdStr, timeoutMs: AGENT_TIMEOUT_MS }, 'Agent query timed out, aborting');
       abortCtrl.abort();
+      // The abort alone can't reap a stuck root-owned child (e.g. `sudo docker logs -f`),
+      // which holds the tool's output pipe open and keeps runAgent() from ever returning.
+      // Force-kill the subprocess tree after a short grace so the SDK iterator unblocks
+      // and the normal cleanup path (delete progress messages, unblock chat) runs.
+      setTimeout(() => {
+        void reapAgentSubprocesses(process.pid).then((n) => {
+          if (n > 0) logger.warn({ chatId: chatIdStr, reaped: n }, 'Reaped stuck subprocess tree after timeout');
+        });
+      }, 2000);
     }, AGENT_TIMEOUT_MS);
 
     // Streaming: send a placeholder message and edit it as text arrives
@@ -1220,6 +1230,14 @@ export function createBot(): Bot {
     const aborted = abortActiveQuery(chatIdStr);
     if (aborted) {
       await ctx.reply('Stopped.');
+      // Same as the timeout path: if the running command is a stuck root-owned child,
+      // the abort signal can't reap it. Force-kill the subprocess tree so the chat
+      // actually unblocks instead of hanging on "Running command...".
+      setTimeout(() => {
+        void reapAgentSubprocesses(process.pid).then((n) => {
+          if (n > 0) logger.warn({ chatId: chatIdStr, reaped: n }, 'Reaped stuck subprocess tree after /stop');
+        });
+      }, 2000);
     } else {
       await ctx.reply('Nothing running.');
     }

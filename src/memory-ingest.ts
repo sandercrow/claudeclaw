@@ -1,6 +1,6 @@
 import { generateContent, parseJsonResponse } from './gemini.js';
 import { cosineSimilarity, embedText } from './embeddings.js';
-import { getMemoriesWithEmbeddings, saveStructuredMemory, saveMemoryEmbedding } from './db.js';
+import { getMemoriesWithEmbeddings, saveStructuredMemory, saveMemoryEmbedding, supersedeMemory } from './db.js';
 import { logger } from './logger.js';
 
 // Callback for notifying when a high-importance memory is created.
@@ -110,18 +110,32 @@ export async function ingestConversationTurn(
       logger.warn({ err: embErr }, 'Failed to generate embedding for duplicate check');
     }
 
-    // Duplicate detection: skip if a very similar memory already exists
+    // Duplicate / update detection:
+    // - sim > 0.97: near-identical, skip (true duplicate, nothing new)
+    // - sim in (0.85, 0.97]: the new memory is likely an UPDATE or correction
+    //   of an existing fact. Save the new one and supersede the old one so
+    //   corrections actually persist instead of being silently dropped.
+    let supersedesId: number | null = null;
     if (embedding.length > 0) {
       const existing = getMemoriesWithEmbeddings(chatId);
+      let bestSim = 0;
+      let bestId: number | null = null;
       for (const mem of existing) {
         const sim = cosineSimilarity(embedding, mem.embedding);
-        if (sim > 0.85) {
-          logger.debug(
-            { similarity: sim.toFixed(3), existingId: mem.id, newSummary: result.summary.slice(0, 60) },
-            'Skipping duplicate memory',
-          );
-          return false;
+        if (sim > bestSim) {
+          bestSim = sim;
+          bestId = mem.id;
         }
+      }
+      if (bestSim > 0.97) {
+        logger.debug(
+          { similarity: bestSim.toFixed(3), existingId: bestId, newSummary: result.summary.slice(0, 60) },
+          'Skipping near-identical duplicate memory',
+        );
+        return false;
+      }
+      if (bestSim > 0.85 && bestId !== null) {
+        supersedesId = bestId;
       }
     }
 
@@ -139,6 +153,15 @@ export async function ingestConversationTurn(
     // Store the embedding we already generated
     if (embedding.length > 0) {
       saveMemoryEmbedding(memoryId, embedding);
+    }
+
+    // If this memory updates an existing similar one, mark the old one stale
+    if (supersedesId !== null) {
+      supersedeMemory(supersedesId, memoryId);
+      logger.info(
+        { staleId: supersedesId, newId: memoryId },
+        'Memory superseded by updated fact (ingest-time dedup)',
+      );
     }
 
     // Notify on high-importance memories so the user can pin them

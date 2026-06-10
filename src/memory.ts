@@ -2,7 +2,9 @@ import { agentObsidianConfig, GOOGLE_API_KEY } from './config.js';
 import {
   batchUpdateMemoryRelevance,
   decayMemories,
+  getConsolidationsNeedingReembedding,
   getConsolidationsWithEmbeddings,
+  getMemoriesNeedingReembedding,
   getOtherAgentActivity,
   getRecentConsolidations,
   getRecentHighImportanceMemories,
@@ -10,6 +12,8 @@ import {
   pruneConversationLog,
   pruneSlackMessages,
   pruneWaMessages,
+  saveConsolidationEmbedding,
+  saveMemoryEmbedding,
   searchConsolidations,
   searchConversationHistory,
   searchMemories,
@@ -45,13 +49,18 @@ export async function buildMemoryContext(
   const summaryMap = new Map<number, string>();
   const memLines: string[] = [];
 
-  // Embed the query for vector search (async, adds ~200ms but gives semantic results)
+  // Embed the query for vector search (async, adds ~200ms but gives semantic results).
+  // Hard 2s timeout: if the embedding API hangs, we fall back to keyword search
+  // instead of stalling the user's reply.
   let queryEmbedding: number[] | undefined;
   if (GOOGLE_API_KEY) {
     try {
-      queryEmbedding = await embedText(userMessage);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Query embedding timeout')), 2000),
+      );
+      queryEmbedding = await Promise.race([embedText(userMessage), timeout]);
     } catch {
-      // Embedding failure is non-fatal; falls back to keyword search
+      // Embedding failure/timeout is non-fatal; falls back to keyword search
     }
   }
 
@@ -147,7 +156,7 @@ export async function buildMemoryContext(
   // When the user is asking about past conversations, search the conversation_log
   // for matching exchanges. This gives the agent access to the full context that
   // memory extraction may have compressed into a single sentence.
-  const recallKeywords = /\bremember\b|\brecall\b|\byesterday\b|\blast time\b|\bwe talked\b|\bwe discussed\b|\bwhat do you know\b|\bdo you know\b|\bwhat did we\b|\bpreviously\b|\bearlier\b|\blast week\b|\bfew days\b/i;
+  const recallKeywords = /\bremember\b|\brecall\b|\byesterday\b|\blast time\b|\bwe talked\b|\bwe discussed\b|\bwhat do you know\b|\bdo you know\b|\bwhat did we\b|\bpreviously\b|\bearlier\b|\blast week\b|\bfew days\b|recuerd\w*|acuerd\w*|\bayer\b|\banteayer\b|\bhablamos\b|\bdijimos\b|\bcomentamos\b|\bquedamos\b|\bdijiste\b|\bcomentaste\b|semana pasada|hace unos d[ií]as|hace d[ií]as|el otro d[ií]a|qu[eé] sabes|sabes (de|sobre|algo)|\banteriormente\b|conversaci[oó]n anterior/i;
   if (recallKeywords.test(userMessage)) {
     const historyTurns = searchConversationHistory(chatId, userMessage, agentId, 7, 10);
     if (historyTurns.length > 0) {
@@ -219,6 +228,56 @@ export function runDecaySweep(): void {
       { wa_messages: wa.messages, wa_outbox: wa.outbox, wa_map: wa.map, slack },
       'Retention pruning complete',
     );
+  }
+}
+
+/**
+ * Re-embed memories and consolidations whose vectors were produced with an
+ * older embedding model or dimensionality. Runs in the maintenance-owner
+ * process only, after startup. Throttled to be gentle on the API.
+ */
+export async function reembedStaleVectors(): Promise<void> {
+  if (!GOOGLE_API_KEY) return;
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let reembedded = 0;
+
+  try {
+    const memories = getMemoriesNeedingReembedding(200);
+    for (const mem of memories) {
+      try {
+        const entities = safeParse(mem.entities).join(' ');
+        const topics = safeParse(mem.topics).join(' ');
+        const embedding = await embedText(`${mem.summary} ${entities} ${topics}`.trim());
+        if (embedding.length > 0) {
+          saveMemoryEmbedding(mem.id, embedding);
+          reembedded++;
+        }
+      } catch (err) {
+        logger.warn({ err, memoryId: mem.id }, 'Re-embedding memory failed, will retry next run');
+      }
+      await sleep(300);
+    }
+
+    const consolidations = getConsolidationsNeedingReembedding(100);
+    for (const c of consolidations) {
+      try {
+        const embedding = await embedText(`${c.summary} ${c.insight}`);
+        if (embedding.length > 0) {
+          saveConsolidationEmbedding(c.id, embedding);
+          reembedded++;
+        }
+      } catch (err) {
+        logger.warn({ err, consolidationId: c.id }, 'Re-embedding consolidation failed, will retry next run');
+      }
+      await sleep(300);
+    }
+
+    if (reembedded > 0) {
+      logger.info({ reembedded }, 'Re-embedded stale vectors with current embedding model');
+    }
+  } catch (err) {
+    logger.error({ err }, 'reembedStaleVectors failed');
   }
 }
 

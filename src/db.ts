@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DB_ENCRYPTION_KEY, STORE_DIR } from './config.js';
-import { cosineSimilarity } from './embeddings.js';
+import { cosineSimilarity, EMBEDDING_MODEL_TAG } from './embeddings.js';
 import { logger } from './logger.js';
 
 // ── Field-Level Encryption (AES-256-GCM) ────────────────────────────
@@ -77,7 +77,8 @@ function createSchema(database: Database.Database): void {
       last_run    INTEGER,
       last_result TEXT,
       status      TEXT NOT NULL DEFAULT 'active',
-      created_at  INTEGER NOT NULL
+      created_at  INTEGER NOT NULL,
+      silent      INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON scheduled_tasks(status, next_run);
@@ -348,6 +349,9 @@ function runMigrations(database: Database.Database): void {
   }
   if (!taskColNames.includes('last_status')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN last_status TEXT`);
+  }
+  if (!taskColNames.includes('silent')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN silent INTEGER NOT NULL DEFAULT 0`);
   }
 
   // ── Memory V2 migration ──────────────────────────────────────────────
@@ -635,15 +639,41 @@ const STOP_WORDS = new Set([
   'come', 'go', 'see', 'look', 'find', 'give', 'tell', 'say',
   'much', 'many', 'well', 'also', 'back', 'use', 'way',
   'feel', 'mark', 'marks', 'does', 'how',
+  // Spanish stop words (the user may converse in Spanish)
+  'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'de', 'del',
+  'al', 'y', 'o', 'u', 'e', 'que', 'qué', 'como', 'cómo', 'cuando',
+  'cuándo', 'donde', 'dónde', 'quien', 'quién', 'cual', 'cuál', 'cuales',
+  'porque', 'porqué', 'para', 'por', 'con', 'sin', 'sobre', 'entre',
+  'hasta', 'desde', 'hacia', 'según', 'segun', 'durante', 'mediante',
+  'es', 'son', 'era', 'eran', 'fue', 'fueron', 'ser', 'estar', 'está',
+  'esta', 'están', 'estan', 'estaba', 'estaban', 'hay', 'ha', 'han',
+  'he', 'hemos', 'haber', 'había', 'habia', 'tiene', 'tienen', 'tengo',
+  'tenemos', 'tener', 'tenía', 'tenia', 'hace', 'hacen', 'hacer', 'hizo',
+  'puede', 'pueden', 'puedo', 'podemos', 'poder', 'podría', 'podria',
+  'quiero', 'quieres', 'quiere', 'queremos', 'querer', 'me', 'te', 'se',
+  'nos', 'os', 'le', 'les', 'lo', 'mi', 'mis', 'tu', 'tus', 'su', 'sus',
+  'nuestro', 'nuestra', 'nuestros', 'nuestras', 'este', 'esto', 'estos',
+  'estas', 'ese', 'esa', 'eso', 'esos', 'esas', 'aquel', 'aquella',
+  'aquello', 'sí', 'si', 'ya', 'aún', 'aun', 'también', 'tambien',
+  'tampoco', 'pero', 'sino', 'aunque', 'pues', 'entonces', 'luego',
+  'ahora', 'antes', 'después', 'despues', 'siempre', 'nunca', 'nada',
+  'algo', 'alguien', 'nadie', 'todo', 'toda', 'todos', 'todas', 'otro',
+  'otra', 'otros', 'otras', 'mismo', 'misma', 'muy', 'más', 'mas',
+  'menos', 'mucho', 'mucha', 'muchos', 'muchas', 'poco', 'poca', 'pocos',
+  'pocas', 'tan', 'tanto', 'tanta', 'cada', 'ni', 'bien', 'mal', 'solo',
+  'sólo', 'así', 'asi', 'aquí', 'aqui', 'ahí', 'ahi', 'allí', 'alli',
+  'ver', 'mira', 'dime', 'haz', 'hazme', 'dame', 'puedes', 'podrías',
+  'podrias', 'gracias', 'vale', 'bueno', 'buena',
 ]);
 
 /**
  * Extract meaningful keywords from a query, stripping stop words and short tokens.
+ * Unicode-aware: preserves accented characters (qué, código) instead of mangling them.
  */
 function extractKeywords(query: string): string[] {
   return query
     .replace(/[""]/g, '"')
-    .replace(/[^\w\s]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
     .toLowerCase()
     .trim()
     .split(/\s+/)
@@ -665,9 +695,16 @@ export function searchMemories(
   if (queryEmbedding && queryEmbedding.length > 0) {
     const candidates = getMemoriesWithEmbeddings(chatId);
     if (candidates.length > 0) {
+      // Hybrid score: semantic similarity weighted by salience so the
+      // relevance feedback loop (touch/penalize) actually shapes retrieval.
+      // Salience range is 0..5; weight keeps similarity dominant (75/25).
       const scored = candidates
-        .map((c) => ({ id: c.id, score: cosineSimilarity(queryEmbedding, c.embedding) }))
-        .filter((s) => s.score > 0.3) // minimum similarity threshold
+        .map((c) => {
+          const sim = cosineSimilarity(queryEmbedding, c.embedding);
+          const salienceWeight = 0.75 + 0.25 * (Math.min(c.salience ?? 1, 5) / 5);
+          return { id: c.id, sim, score: sim * salienceWeight };
+        })
+        .filter((s) => s.sim > 0.3) // minimum raw similarity threshold
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
 
@@ -724,25 +761,79 @@ export function searchMemories(
 }
 
 export function saveMemoryEmbedding(memoryId: number, embedding: number[]): void {
-  db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(embedding), memoryId);
+  db.prepare('UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ?')
+    .run(JSON.stringify(embedding), EMBEDDING_MODEL_TAG, memoryId);
+  invalidateEmbeddingCache();
 }
 
-export function getMemoriesWithEmbeddings(chatId: string): Array<{ id: number; embedding: number[]; summary: string; importance: number }> {
+// ── In-RAM embedding cache ──────────────────────────────────────────
+// Parsing every embedding JSON on every message is O(n) work that grows
+// with the memory count. Cache the parsed vectors with a short TTL.
+// TTL (rather than pure invalidation) keeps multi-process setups safe:
+// another agent process writing to the same DB is picked up within 60s.
+interface CachedMemoryEmbedding { id: number; embedding: number[]; summary: string; importance: number; salience: number }
+const memEmbeddingCache = new Map<string, { at: number; rows: CachedMemoryEmbedding[] }>();
+const MEM_EMBEDDING_CACHE_TTL_MS = 60_000;
+
+function invalidateEmbeddingCache(): void {
+  memEmbeddingCache.clear();
+}
+
+export function getMemoriesWithEmbeddings(chatId: string): CachedMemoryEmbedding[] {
+  const cached = memEmbeddingCache.get(chatId);
+  if (cached && Date.now() - cached.at < MEM_EMBEDDING_CACHE_TTL_MS) {
+    return cached.rows;
+  }
+  // Only vectors produced by the CURRENT embedding model/dims are comparable.
+  // Older vectors are excluded here and re-embedded by the maintenance job.
   const rows = db
-    .prepare('SELECT id, embedding, summary, importance FROM memories WHERE chat_id = ? AND embedding IS NOT NULL AND superseded_by IS NULL')
-    .all(chatId) as Array<{ id: number; embedding: string; summary: string; importance: number }>;
-  return rows.map((r) => ({
+    .prepare(
+      `SELECT id, embedding, summary, importance, salience FROM memories
+       WHERE chat_id = ? AND embedding IS NOT NULL AND superseded_by IS NULL AND embedding_model = ?`,
+    )
+    .all(chatId, EMBEDDING_MODEL_TAG) as Array<{ id: number; embedding: string; summary: string; importance: number; salience: number }>;
+  const parsed = rows.map((r) => ({
     id: r.id,
     embedding: JSON.parse(r.embedding) as number[],
     summary: r.summary,
     importance: r.importance,
+    salience: r.salience,
   }));
+  memEmbeddingCache.set(chatId, { at: Date.now(), rows: parsed });
+  return parsed;
+}
+
+/**
+ * List memories whose stored embedding was produced by an older model or
+ * dimensionality (or that have no embedding at all). Used by the startup
+ * maintenance job to re-embed them with the current model.
+ */
+export function getMemoriesNeedingReembedding(limit = 200): Array<{ id: number; summary: string; entities: string; topics: string }> {
+  return db
+    .prepare(
+      `SELECT id, summary, entities, topics FROM memories
+       WHERE superseded_by IS NULL
+         AND (embedding IS NULL OR embedding_model IS NULL OR embedding_model != ?)
+       LIMIT ?`,
+    )
+    .all(EMBEDDING_MODEL_TAG, limit) as Array<{ id: number; summary: string; entities: string; topics: string }>;
+}
+
+/** Same as above, for consolidation insights. */
+export function getConsolidationsNeedingReembedding(limit = 100): Array<{ id: number; summary: string; insight: string }> {
+  return db
+    .prepare(
+      `SELECT id, summary, insight FROM consolidations
+       WHERE embedding IS NULL OR embedding_model IS NULL OR embedding_model != ?
+       LIMIT ?`,
+    )
+    .all(EMBEDDING_MODEL_TAG, limit) as Array<{ id: number; summary: string; insight: string }>;
 }
 
 export function getRecentHighImportanceMemories(chatId: string, limit = 5): Memory[] {
   return db
     .prepare(
-      `SELECT * FROM memories WHERE chat_id = ? AND importance >= 0.5
+      `SELECT * FROM memories WHERE chat_id = ? AND importance >= 0.5 AND superseded_by IS NULL
        ORDER BY accessed_at DESC LIMIT ?`,
     )
     .all(chatId, limit) as Memory[];
@@ -808,6 +899,7 @@ export function decayMemories(): void {
     WHERE created_at < ? AND pinned = 0
   `).run(oneDayAgo);
   db.prepare('DELETE FROM memories WHERE salience < 0.05 AND pinned = 0').run();
+  invalidateEmbeddingCache();
 }
 
 export function pinMemory(memoryId: number): void {
@@ -845,13 +937,13 @@ export function saveConsolidation(
 
 export function saveConsolidationEmbedding(consolidationId: number, embedding: number[]): void {
   db.prepare('UPDATE consolidations SET embedding = ?, embedding_model = ? WHERE id = ?')
-    .run(JSON.stringify(embedding), 'embedding-001', consolidationId);
+    .run(JSON.stringify(embedding), EMBEDDING_MODEL_TAG, consolidationId);
 }
 
 export function getConsolidationsWithEmbeddings(chatId: string): Array<{ id: number; embedding: number[]; summary: string; insight: string }> {
   const rows = db
     .prepare('SELECT id, embedding, summary, insight FROM consolidations WHERE chat_id = ? AND embedding IS NOT NULL AND embedding_model = ?')
-    .all(chatId, 'embedding-001') as Array<{ id: number; embedding: string; summary: string; insight: string }>;
+    .all(chatId, EMBEDDING_MODEL_TAG) as Array<{ id: number; embedding: string; summary: string; insight: string }>;
   return rows.map((r) => ({ ...r, embedding: JSON.parse(r.embedding) as number[] }));
 }
 
@@ -859,6 +951,7 @@ export function supersedeMemory(oldId: number, newId: number): void {
   db.prepare(
     `UPDATE memories SET superseded_by = ?, importance = importance * 0.3, salience = salience * 0.5 WHERE id = ?`,
   ).run(newId, oldId);
+  invalidateEmbeddingCache();
 }
 
 export function updateMemoryConnections(memoryId: number, connections: Array<{ linked_to: number; relationship: string }>): void {
@@ -917,6 +1010,7 @@ export interface ScheduledTask {
   agent_id: string;
   started_at: number | null;
   last_status: 'success' | 'failed' | 'timeout' | null;
+  silent: number;
 }
 
 export function createScheduledTask(
@@ -925,12 +1019,13 @@ export function createScheduledTask(
   schedule: string,
   nextRun: number,
   agentId = 'main',
+  silent = false,
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `INSERT INTO scheduled_tasks (id, prompt, schedule, next_run, status, created_at, agent_id)
-     VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-  ).run(id, prompt, schedule, nextRun, now, agentId);
+    `INSERT INTO scheduled_tasks (id, prompt, schedule, next_run, status, created_at, agent_id, silent)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
+  ).run(id, prompt, schedule, nextRun, now, agentId, silent ? 1 : 0);
 }
 
 export function getDueTasks(agentId = 'main'): ScheduledTask[] {

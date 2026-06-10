@@ -24,7 +24,16 @@ const envConfig = readEnvFile([
   'SECURITY_PIN_HASH',
   'IDLE_LOCK_MINUTES',
   'EMERGENCY_KILL_PHRASE',
+  'CLAUDECLAW_MAINTENANCE',
 ]);
+
+// ── Maintenance ownership ────────────────────────────────────────────
+// Decay, consolidation and retention pruning run only in ONE process per
+// database. By default that's the 'main' agent, but on machines where no
+// 'main' process exists (e.g. a VM running a single non-main agent),
+// set CLAUDECLAW_MAINTENANCE=1 in .env to make that agent own maintenance.
+export const MAINTENANCE_OVERRIDE =
+  (process.env.CLAUDECLAW_MAINTENANCE || envConfig.CLAUDECLAW_MAINTENANCE || '') === '1';
 
 // ── Multi-agent support ──────────────────────────────────────────────
 // These are mutable and overridden by index.ts when --agent is passed.

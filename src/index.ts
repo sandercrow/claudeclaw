@@ -4,14 +4,14 @@ import path from 'path';
 import { loadAgentConfig, resolveAgentDir, resolveAgentClaudeMd } from './agent-config.js';
 import { createBot } from './bot.js';
 import { checkPendingMigrations } from './migrations.js';
-import { ALLOWED_CHAT_ID, PRIMARY_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE } from './config.js';
+import { ALLOWED_CHAT_ID, PRIMARY_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, MAINTENANCE_OVERRIDE, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE } from './config.js';
 import { startDashboard } from './dashboard.js';
 import { initDatabase, cleanupOldMissionTasks, insertAuditLog } from './db.js';
 import { initSecurity, setAuditCallback } from './security.js';
 import { logger } from './logger.js';
 import { cleanupOldUploads } from './media.js';
 import { runConsolidation } from './memory-consolidate.js';
-import { runDecaySweep } from './memory.js';
+import { reembedStaleVectors, runDecaySweep } from './memory.js';
 import { initOAuthHealthCheck } from './oauth-health.js';
 import { initOrchestrator } from './orchestrator.js';
 import { initScheduler } from './scheduler.js';
@@ -138,16 +138,28 @@ async function main(): Promise<void> {
 
   initOrchestrator();
 
-  // Decay and consolidation run ONLY in the main process to prevent
+  // Decay and consolidation run ONLY in one process per database to prevent
   // multi-process over-decay (5x decay on simultaneous restart) and
   // duplicate consolidation records from overlapping memory batches.
-  if (AGENT_ID === 'main') {
+  // Default owner is 'main'; on machines without a 'main' process,
+  // set CLAUDECLAW_MAINTENANCE=1 so the resident agent owns maintenance.
+  const ownsMaintenance = AGENT_ID === 'main' || MAINTENANCE_OVERRIDE;
+  if (ownsMaintenance) {
     runDecaySweep();
     cleanupOldMissionTasks(7);
     setInterval(() => { runDecaySweep(); cleanupOldMissionTasks(7); }, 24 * 60 * 60 * 1000);
 
     // Memory consolidation: find patterns across recent memories every 30 minutes
     if (ALLOWED_CHAT_ID && GOOGLE_API_KEY) {
+      // Re-embed vectors created with an older embedding model/dims (one-off
+      // migration that no-ops once everything is current). Runs 1 min after
+      // startup, before the first consolidation.
+      setTimeout(() => {
+        void reembedStaleVectors().catch((err) =>
+          logger.error({ err }, 'Stale vector re-embedding failed'),
+        );
+      }, 60 * 1000);
+
       // Delay first consolidation 2 minutes after startup to let things settle
       setTimeout(() => {
         void runConsolidation(PRIMARY_CHAT_ID).catch((err) =>
@@ -162,7 +174,7 @@ async function main(): Promise<void> {
       logger.info('Memory consolidation enabled (every 30 min)');
     }
   } else {
-    logger.info({ agentId: AGENT_ID }, 'Skipping decay/consolidation (main process owns these)');
+    logger.info({ agentId: AGENT_ID }, 'Skipping decay/consolidation (maintenance owner process handles these; set CLAUDECLAW_MAINTENANCE=1 if no main process runs on this machine)');
   }
 
   cleanupOldUploads();

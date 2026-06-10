@@ -31,10 +31,14 @@ const agentFlagIdx = process.argv.indexOf('--agent');
 const cliAgentId = agentFlagIdx !== -1
   ? process.argv[agentFlagIdx + 1] ?? 'main'
   : process.env.CLAUDECLAW_AGENT_ID ?? 'main';
-// Remove --agent and its value from rest args (only filter when flag is present)
-const cleanedArgv = agentFlagIdx !== -1
+// Parse --silent boolean flag
+const silentFlagIdx = process.argv.indexOf('--silent');
+const cliSilent = silentFlagIdx !== -1;
+// Remove --agent (and value) and --silent from rest args
+const argvAfterAgent = agentFlagIdx !== -1
   ? process.argv.filter((_, i) => i !== agentFlagIdx && i !== agentFlagIdx + 1)
   : [...process.argv];
+const cleanedArgv = argvAfterAgent.filter((v) => v !== '--silent');
 const [, , command, ...rest] = cleanedArgv;
 
 function formatDate(unix: number | null): string {
@@ -66,13 +70,14 @@ switch (command) {
     }
 
     const id = randomBytes(4).toString('hex');
-    createScheduledTask(id, prompt, cron, nextRun, cliAgentId);
+    createScheduledTask(id, prompt, cron, nextRun, cliAgentId, cliSilent);
 
     console.log(`Task created: ${id}`);
     console.log(`Agent:        ${cliAgentId}`);
     console.log(`Prompt:       ${prompt}`);
     console.log(`Schedule:     ${cron}`);
     console.log(`Next run:     ${formatDate(nextRun)}`);
+    if (cliSilent) console.log(`Silent:       yes (no Telegram notifications)`);
     break;
   }
 

@@ -89,7 +89,10 @@ async function runDueTasks(): Promise<void> {
       const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
 
       try {
-        await sender(`Scheduled task running: "${task.prompt.slice(0, 80)}${task.prompt.length > 80 ? '...' : ''}"`);
+        const isSilent = task.silent === 1;
+        if (!isSilent) {
+          await sender(`Scheduled task running: "${task.prompt.slice(0, 80)}${task.prompt.length > 80 ? '...' : ''}"`);
+        }
 
         // Run as a fresh agent call (no session — scheduled tasks are autonomous)
         const result = await runAgent(task.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
@@ -97,14 +100,17 @@ async function runDueTasks(): Promise<void> {
 
         if (result.aborted) {
           updateTaskAfterRun(task.id, nextRun, 'Timed out after 10 minutes', 'timeout');
+          // Always notify on timeout, even silent tasks (this is an error)
           await sender(`⏱ Task timed out after 10m: "${task.prompt.slice(0, 60)}..." — killed.`);
           logger.warn({ taskId: task.id }, 'Task timed out');
           return;
         }
 
         const text = result.text?.trim() || 'Task completed with no output.';
-        for (const chunk of splitMessage(formatForTelegram(text))) {
-          await sender(chunk);
+        if (!isSilent) {
+          for (const chunk of splitMessage(formatForTelegram(text))) {
+            await sender(chunk);
+          }
         }
 
         // Inject task output into the active chat session so user replies have context
@@ -149,6 +155,17 @@ async function runDueMissionTasks(): Promise<void> {
   logger.info({ missionId: mission.id, title: mission.title }, 'Running mission task');
 
   const chatId = PRIMARY_CHAT_ID || 'mission';
+
+  // Non-blocking heads-up so the user knows the agent has picked up the task.
+  // Fired outside the messageQueue so it doesn't block the agent run.
+  (async () => {
+    try {
+      await sender('🚀 Mission task started: "' + mission.title + '" (' + mission.id.slice(0, 8) + ')');
+    } catch {
+      // ignore: notification is best-effort
+    }
+  })();
+
   messageQueue.enqueue(chatId, async () => {
     const abortController = new AbortController();
     const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);

@@ -144,9 +144,10 @@ const voiceEnabledChats = new Set<string>();
 const chatModelOverride = new Map<string, string>();
 
 const AVAILABLE_MODELS: Record<string, string> = {
-  opus: 'claude-opus-4-6',
+  opus: 'claude-opus-4-7',
   sonnet: 'claude-sonnet-4-5',
   haiku: 'claude-haiku-4-5',
+  fable: 'claude-fable-5',
 };
 const DEFAULT_MODEL_LABEL = 'opus';
 
@@ -589,7 +590,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       sessionId,
       () => void sendTyping(ctx.api, chatId),
       onProgress,
-      chatModelOverride.get(chatIdStr) ?? agentDefaultModel,
+      chatModelOverride.get(chatIdStr) ?? agentDefaultModel ?? 'claude-opus-4-7',
       abortCtrl,
       onStreamText,
       agentMcpAllowlist,
@@ -863,7 +864,7 @@ export function createBot(): Bot {
     { command: 'newchat', description: 'Start a new Claude session' },
     { command: 'respin', description: 'Reload recent context' },
     { command: 'voice', description: 'Toggle voice mode on/off' },
-    { command: 'model', description: 'Switch model (opus/sonnet/haiku)' },
+    { command: 'model', description: 'Switch model (opus/sonnet/haiku/fable)' },
     { command: 'memory', description: 'View recent memories' },
     { command: 'forget', description: 'Clear session' },
     { command: 'wa', description: 'Recent WhatsApp messages' },
@@ -889,7 +890,7 @@ export function createBot(): Bot {
       '/newchat — Start a new Claude session\n' +
       '/respin — Reload recent context\n' +
       '/voice — Toggle voice mode on/off\n' +
-      '/model — Switch model (opus/sonnet/haiku)\n' +
+      '/model — Switch model (opus/sonnet/haiku/fable)\n' +
       '/memory — View recent memories\n' +
       '/forget — Clear session\n' +
       '/wa — WhatsApp messages\n' +
@@ -1664,7 +1665,7 @@ async function processDashboardMessage(
       sessionId,
       () => {}, // no typing action for dashboard
       onProgress,
-      agentDefaultModel,
+      agentDefaultModel ?? 'claude-opus-4-7',
       abortCtrl,
       undefined, // no streaming for dashboard
       agentMcpAllowlist,

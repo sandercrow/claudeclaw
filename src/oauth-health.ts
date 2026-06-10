@@ -15,6 +15,7 @@ let lastAlertLevel: 'none' | 'warning' | 'expired' = 'none';
 interface Credentials {
   claudeAiOauth?: {
     expiresAt?: number;
+    refreshToken?: string;
     subscriptionType?: string;
   };
 }
@@ -50,6 +51,15 @@ async function checkOAuthHealth(sender: Sender): Promise<void> {
   }
 
   const creds = readCredentials();
+
+  // setup-token creates credentials with a refreshToken — the CLI auto-renews the
+  // access token transparently. The expiresAt only reflects the short-lived access
+  // token (~1h), not the session lifetime. Skip alerting entirely in this case.
+  if (creds?.claudeAiOauth?.refreshToken) {
+    if (lastAlertLevel !== 'none') lastAlertLevel = 'none';
+    logger.debug('Refresh token present — setup-token auth, skipping expiry check');
+    return;
+  }
 
   if (!creds?.claudeAiOauth?.expiresAt) {
     // No credentials file found. This is expected when using setup-token auth

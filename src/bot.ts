@@ -48,6 +48,14 @@ import {
 const globalStreamLastEdit = new Map<string, number>();
 const GLOBAL_STREAM_INTERVAL_MS = 2500;
 
+// ── Auto-recovery cooldown ──────────────────────────────────────────
+// Prevents infinite loop when exit code 1 is caused by rate limits, not context exhaustion.
+// Tracks last auto-recovery attempt per chat; blocks retries within cooldown window.
+const autoRecoveryLastAttempt = new Map<string, number>();
+const AUTO_RECOVERY_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const autoRecoveryInProgress = new Set<string>(); // prevents recursive auto-recovery
+const AUTO_RECOVERY_MIN_CONTEXT = 50_000; // minimum tokens to consider context exhaustion plausible
+
 // ── Context window tracking ──────────────────────────────────────────
 // Uses input_tokens from the last API call (= actual context window size:
 // system prompt + conversation history + tool results for that call).
@@ -711,9 +719,25 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
           result.usage.totalCostUsd,
           result.usage.didCompact,
           AGENT_ID,
+          result.usage.requestedModel,
+          result.usage.actualModel,
         );
       } catch (dbErr) {
         logger.error({ err: dbErr }, 'Failed to save token usage');
+      }
+
+      // Alert on silent model downgrade (e.g. fable → opus by guardrail)
+      if (
+        result.usage.requestedModel &&
+        result.usage.actualModel &&
+        result.usage.requestedModel !== result.usage.actualModel
+      ) {
+        try {
+          await ctx.reply(
+            `⚠️ Modelo redirigido: pediste <code>${result.usage.requestedModel}</code>, respondió <code>${result.usage.actualModel}</code>.`,
+            { parse_mode: 'HTML' },
+          );
+        } catch { /* best effort */ }
       }
 
       const warning = checkContextWarning(chatIdStr, activeSessionId, result.usage);
@@ -735,7 +759,21 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     if (errMsg.includes('exited with code 1')) {
       const usage = lastUsage.get(chatIdStr);
       const contextSize = usage?.lastCallInputTokens || usage?.lastCallCacheRead || 0;
-      if (contextSize > 0) {
+
+      // Guard: only attempt auto-recovery if context is large enough to plausibly
+      // be exhausted AND no recovery is already in progress for this chat.
+      if (contextSize >= AUTO_RECOVERY_MIN_CONTEXT && !autoRecoveryInProgress.has(chatIdStr)) {
+        // Check cooldown to prevent infinite loop (e.g. rate limit also exits with code 1)
+        const lastAttempt = autoRecoveryLastAttempt.get(chatIdStr) || 0;
+        const now = Date.now();
+        if (now - lastAttempt < AUTO_RECOVERY_COOLDOWN_MS) {
+          logger.warn({ chatId: chatIdStr, lastAttempt }, 'Auto-recovery skipped: cooldown active (likely rate limit or repeated failure)');
+          await ctx.reply('Claude Code keeps failing (probably hit the API rate/usage limit). Wait a few minutes and try again, or use /newchat to start fresh.');
+          return;
+        }
+        autoRecoveryLastAttempt.set(chatIdStr, now);
+        autoRecoveryInProgress.add(chatIdStr);
+
         // Context exhaustion plausible -- auto-recover with respin + retry
         await ctx.reply('Context exhausted. Auto-recovering...');
         logger.info({ chatId: chatIdStr, contextSize }, 'Auto-recovery: context exhaustion detected, performing respin');
@@ -753,10 +791,21 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
         } catch (retryErr) {
           logger.error({ err: retryErr }, 'Auto-recovery retry failed');
           await ctx.reply('Auto-recovery failed. Use /newchat + /respin manually.');
+        } finally {
+          autoRecoveryInProgress.delete(chatIdStr);
         }
       } else {
-        // No prior usage -- likely a subprocess init failure, not context exhaustion
-        await ctx.reply('Claude Code subprocess failed to start. Check logs or try /newchat.');
+        // Context too small for exhaustion, already recovering, or no usage data.
+        // Most likely a rate limit, API error, or subprocess init failure.
+        if (autoRecoveryInProgress.has(chatIdStr)) {
+          logger.warn({ chatId: chatIdStr, contextSize }, 'Auto-recovery skipped: already in progress (preventing recursive loop)');
+        } else {
+          logger.warn({ chatId: chatIdStr, contextSize }, 'Claude Code exited with code 1 but context too small for exhaustion (likely rate limit or init failure)');
+        }
+        // Clear the broken session so the next message starts fresh
+        clearSession(chatIdStr, AGENT_ID);
+        sessionBaseline.delete(chatIdStr);
+        await ctx.reply('Claude Code crashed (session or model issue). Session cleared — send your message again.');
       }
     } else {
       await ctx.reply('Something went wrong. Check the logs and try again.');
@@ -1089,7 +1138,11 @@ export function createBot(): Bot {
     }
 
     chatModelOverride.set(chatIdStr, modelId);
-    await ctx.reply(`Model changed: ${arg} (${modelId})`);
+    // Clear session when switching models — resuming a session created with
+    // a different model causes Claude Code to exit with code 1.
+    clearSession(chatIdStr, AGENT_ID);
+    sessionBaseline.delete(chatIdStr);
+    await ctx.reply(`Model changed: ${arg} (${modelId}). Session cleared.`);
   });
 
   // /memory — show recent memories for this chat
@@ -1738,6 +1791,8 @@ async function processDashboardMessage(
           result.usage.totalCostUsd,
           result.usage.didCompact,
           AGENT_ID,
+          result.usage.requestedModel,
+          result.usage.actualModel,
         );
       } catch (dbErr) {
         logger.error({ err: dbErr }, 'Failed to save token usage');

@@ -336,6 +336,16 @@ function runMigrations(database: Database.Database): void {
   if (!usageCols.some((c) => c.name === 'agent_id')) {
     database.exec(`ALTER TABLE token_usage ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'main'`);
   }
+  // Track requested vs actual model to detect silent downgrades (e.g. fable → opus)
+  if (!usageCols.some((c) => c.name === 'requested_model')) {
+    database.exec(`ALTER TABLE token_usage ADD COLUMN requested_model TEXT`);
+  }
+  if (!usageCols.some((c) => c.name === 'actual_model')) {
+    database.exec(`ALTER TABLE token_usage ADD COLUMN actual_model TEXT`);
+  }
+  if (!usageCols.some((c) => c.name === 'model_downgrade')) {
+    database.exec(`ALTER TABLE token_usage ADD COLUMN model_downgrade INTEGER NOT NULL DEFAULT 0`);
+  }
 
   const convoCols = database.prepare(`PRAGMA table_info(conversation_log)`).all() as Array<{ name: string }>;
   if (!convoCols.some((c) => c.name === 'agent_id')) {
@@ -1430,12 +1440,30 @@ export function saveTokenUsage(
   costUsd: number,
   didCompact: boolean,
   agentId = 'main',
+  requestedModel?: string | null,
+  actualModel?: string | null,
 ): void {
   const now = Math.floor(Date.now() / 1000);
+  const downgrade =
+    requestedModel && actualModel && requestedModel !== actualModel ? 1 : 0;
   db.prepare(
-    `INSERT INTO token_usage (chat_id, session_id, input_tokens, output_tokens, cache_read, context_tokens, cost_usd, did_compact, created_at, agent_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(chatId, sessionId ?? null, inputTokens, outputTokens, cacheRead, contextTokens, costUsd, didCompact ? 1 : 0, now, agentId);
+    `INSERT INTO token_usage (chat_id, session_id, input_tokens, output_tokens, cache_read, context_tokens, cost_usd, did_compact, created_at, agent_id, requested_model, actual_model, model_downgrade)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    chatId,
+    sessionId ?? null,
+    inputTokens,
+    outputTokens,
+    cacheRead,
+    contextTokens,
+    costUsd,
+    didCompact ? 1 : 0,
+    now,
+    agentId,
+    requestedModel ?? null,
+    actualModel ?? null,
+    downgrade,
+  );
 }
 
 export interface SessionTokenSummary {

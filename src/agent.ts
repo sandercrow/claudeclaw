@@ -83,6 +83,18 @@ export interface UsageInfo {
    * history + tool results for that call. Use this for context warnings.
    */
   lastCallInputTokens: number;
+  /**
+   * The model that was requested by the caller (label mapped to id).
+   * Filled by runAgent from its `model` param. Null if no explicit override.
+   */
+  requestedModel: string | null;
+  /**
+   * The model the SDK actually served the response with, extracted from the
+   * last assistant message's `message.model` field. If this differs from
+   * `requestedModel` the router silently downgraded/upgraded (e.g. fable → opus
+   * because of a guardrail).
+   */
+  actualModel: string | null;
 }
 
 /** Progress event emitted during agent execution for Telegram feedback. */
@@ -190,6 +202,8 @@ export async function runAgent(
   let lastCallCacheRead = 0;
   let lastCallInputTokens = 0;
   let streamedText = '';
+  let actualModel: string | null = null;
+  const requestedModel: string | null = model ?? null;
 
   // Refresh typing indicator on an interval while Claude works.
   // Telegram's "typing..." action expires after ~5s.
@@ -273,6 +287,27 @@ export async function runAgent(
           lastCallInputTokens = callInputTokens;
         }
 
+        // Capture the model the SDK actually served this call with.
+        // Try multiple paths: msg.model (API response), ev.model (SDK wrapper).
+        const seenModel =
+          (typeof msg?.['model'] === 'string' ? (msg['model'] as string) : null) ||
+          (typeof ev['model'] === 'string' ? (ev['model'] as string) : null);
+        if (seenModel) {
+          if (actualModel && actualModel !== seenModel) {
+            logger.warn(
+              { prev: actualModel, next: seenModel, requested: requestedModel },
+              'Model changed mid-turn',
+            );
+          }
+          actualModel = seenModel;
+          if (requestedModel && seenModel !== requestedModel) {
+            logger.warn(
+              { requested: requestedModel, actual: seenModel },
+              'MODEL_DOWNGRADE: SDK served a different model than requested',
+            );
+          }
+        }
+
         // Extract tool_use blocks from assistant content for progress reporting
         if (onProgress) {
           const content = msg?.['content'] as Array<{ type: string; name?: string }> | undefined;
@@ -323,6 +358,26 @@ export async function runAgent(
         // Extract usage info from result event
         const evUsage = ev['usage'] as Record<string, number> | undefined;
         if (evUsage) {
+          // Try to extract model from result event itself
+          if (!actualModel) {
+            // Path 1: ev.model (top-level on result)
+            if (typeof ev['model'] === 'string') {
+              actualModel = ev['model'] as string;
+            }
+          }
+          if (!actualModel) {
+            // Path 2: modelUsage keys (keyed by model id)
+            const modelUsage = ev['modelUsage'] as Record<string, unknown> | undefined;
+            if (modelUsage && typeof modelUsage === 'object') {
+              const keys = Object.keys(modelUsage);
+              if (keys.length > 0) actualModel = keys[0];
+            }
+          }
+          // Debug: log once per turn if we still couldn't find the model
+          if (!actualModel) {
+            const evKeys = Object.keys(ev).filter(k => k !== 'result');
+            logger.warn({ evKeys, type: ev['type'], subtype: ev['subtype'] }, 'Could not extract actualModel from any event path');
+          }
           usage = {
             inputTokens: evUsage['input_tokens'] ?? 0,
             outputTokens: evUsage['output_tokens'] ?? 0,
@@ -332,6 +387,8 @@ export async function runAgent(
             preCompactTokens,
             lastCallCacheRead,
             lastCallInputTokens,
+            requestedModel,
+            actualModel,
           };
           logger.info(
             {

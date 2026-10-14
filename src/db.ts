@@ -521,6 +521,13 @@ function runMigrations(database: Database.Database): void {
     logger.info('Migration: added pinned column to memories table');
   }
 
+  // Mission Control: per-task model override (e.g. run mission on opus while main agent uses another model)
+  const missionColsForModel = database.prepare(`PRAGMA table_info(mission_tasks)`).all() as Array<{ name: string }>;
+  if (!missionColsForModel.some((c) => c.name === 'model')) {
+    database.exec(`ALTER TABLE mission_tasks ADD COLUMN model TEXT`);
+    logger.info('Migration: added model column to mission_tasks table');
+  }
+
   // Mission Control: migrate assigned_agent from NOT NULL to nullable (allow unassigned tasks)
   const missionCols = database.prepare(`PRAGMA table_info(mission_tasks)`).all() as Array<{ name: string; notnull: number }>;
   const assignedCol = missionCols.find((c) => c.name === 'assigned_agent');
@@ -1887,6 +1894,7 @@ export interface MissionTask {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  model: string | null;
 }
 
 export function createMissionTask(
@@ -1896,12 +1904,13 @@ export function createMissionTask(
   assignedAgent: string | null = null,
   createdBy = 'dashboard',
   priority = 0,
+  model: string | null = null,
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, created_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
-  ).run(id, title, prompt, assignedAgent, createdBy, priority, now);
+    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, created_at, model)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+  ).run(id, title, prompt, assignedAgent, createdBy, priority, now, model);
 }
 
 export function getUnassignedMissionTasks(): MissionTask[] {

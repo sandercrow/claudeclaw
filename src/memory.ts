@@ -217,7 +217,7 @@ export function saveConversationTurn(
  * conversations that must not persist on disk indefinitely.
  */
 export function runDecaySweep(): void {
-  decayMemories();
+  try { decayMemories(); } catch (err) { console.error('decayMemories failed (FK constraint?):', err); }
   pruneConversationLog(500);
 
   // Enforce 3-day retention on messaging data

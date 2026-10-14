@@ -171,7 +171,7 @@ async function runDueMissionTasks(): Promise<void> {
     const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
 
     try {
-      const result = await runAgent(mission.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
+      const result = await runAgent(mission.prompt, undefined, () => {}, undefined, mission.model ?? undefined, abortController, undefined, agentMcpAllowlist);
       clearTimeout(timeout);
 
       if (result.aborted) {

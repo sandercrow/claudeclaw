@@ -153,12 +153,24 @@ const voiceEnabledChats = new Set<string>();
 const chatModelOverride = new Map<string, string>();
 
 const AVAILABLE_MODELS: Record<string, string> = {
-  opus: 'claude-opus-4-7',
+  opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-4-5',
   haiku: 'claude-haiku-4-5',
-  fable: 'claude-fable-5',
+  fable: 'claude-fable-5-1',
 };
 const DEFAULT_MODEL_LABEL = 'opus';
+
+// Per-chat effort override (in-memory, resets on restart)
+// 'max' = "Ultracode" in the Claude Code UI. When not set, SDK default applies.
+type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+const chatEffortOverride = new Map<string, EffortLevel>();
+const EFFORT_ALIASES: Record<string, EffortLevel> = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  max: 'max',
+  ultracode: 'max',
+};
 
 export function setMainModelOverride(model: string): void {
   for (const id of ALLOWED_CHAT_IDS) {
@@ -608,10 +620,11 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       sessionId,
       () => void sendTyping(ctx.api, chatId),
       onProgress,
-      chatModelOverride.get(chatIdStr) ?? agentDefaultModel ?? 'claude-opus-4-7',
+      chatModelOverride.get(chatIdStr) ?? agentDefaultModel ?? 'claude-opus-5-5',
       abortCtrl,
       onStreamText,
       agentMcpAllowlist,
+      chatEffortOverride.get(chatIdStr),
     );
 
     clearTimeout(timeoutId);
@@ -644,7 +657,64 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       logger.info({ newSessionId: result.newSessionId }, 'Session saved');
     }
 
-    const rawResponse = result.text?.trim() || 'Done.';
+    let rawResponse = result.text?.trim() || 'Done.';
+
+    // ── Stale-session auto-heal ──────────────────────────────────────
+    // When resuming a session whose background shell commands were orphaned
+    // (e.g. the previous agent was killed mid-task), Claude sees "No completion
+    // record was found for this background shell command" system messages and
+    // gets stuck parroting that instead of handling the user's actual request.
+    // Detect this, nuke the session, and retry once on a fresh session.
+    const STALE_SESSION_MARKER = 'No completion record was found';
+    if (sessionId && rawResponse.includes(STALE_SESSION_MARKER)) {
+      logger.warn({ chatId: chatIdStr, sessionId }, 'Stale session detected (orphaned background commands), clearing and retrying');
+      clearSession(chatIdStr, AGENT_ID);
+
+      // Clean up streaming placeholder from the poisoned attempt
+      if (streamMsgId) {
+        try { await ctx.api.deleteMessage(chatId, streamMsgId); } catch { /* best effort */ }
+      }
+      for (const msgId of progressMsgIds) {
+        try { await ctx.api.deleteMessage(chatId, msgId); } catch { /* best effort */ }
+      }
+
+      // Retry with a fresh session
+      const retryAbort = new AbortController();
+      setActiveAbort(chatIdStr, retryAbort);
+      const retryTimeout = setTimeout(() => {
+        retryAbort.abort();
+        setTimeout(() => {
+          void reapAgentSubprocesses(process.pid);
+        }, 2000);
+      }, AGENT_TIMEOUT_MS);
+
+      const retryResult = await runAgent(
+        fullMessage,
+        undefined, // fresh session
+        () => void sendTyping(ctx.api, chatId),
+        onProgress,
+        chatModelOverride.get(chatIdStr) ?? agentDefaultModel ?? 'claude-opus-5-5',
+        retryAbort,
+        undefined, // no streaming on retry to keep it simple
+        agentMcpAllowlist,
+        chatEffortOverride.get(chatIdStr),
+      );
+
+      clearTimeout(retryTimeout);
+      setActiveAbort(chatIdStr, null);
+
+      if (retryResult.newSessionId) {
+        setSession(chatIdStr, retryResult.newSessionId, AGENT_ID);
+        logger.info({ newSessionId: retryResult.newSessionId }, 'Fresh session saved after stale-session heal');
+      }
+
+      rawResponse = retryResult.aborted
+        ? `Timed out after ${Math.round(AGENT_TIMEOUT_MS / 1000)}s on retry.`
+        : (retryResult.text?.trim() || 'Done.');
+
+      // Update result reference for downstream usage tracking
+      Object.assign(result, retryResult);
+    }
 
     // Extract file markers before any formatting
     const { text: responseText, files: fileMarkers } = extractFileMarkers(rawResponse);
@@ -754,8 +824,20 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     setProcessing(chatIdStr, false);
     logger.error({ err }, 'Agent error');
 
-    // Detect context window exhaustion (process exits with code 1 after long sessions)
     const errMsg = err instanceof Error ? err.message : String(err);
+
+    // Detect session/rate limit from the SDK (new SDK 0.3.x throws descriptive errors)
+    const sessionLimitMatch = errMsg.match(/session limit.*resets?\s+(.+)/i)
+      || errMsg.match(/rate limit/i)
+      || errMsg.match(/too many requests/i);
+    if (sessionLimitMatch) {
+      const resetInfo = sessionLimitMatch[1] ?? '';
+      logger.warn({ chatId: chatIdStr, errMsg }, 'Session/rate limit hit');
+      await ctx.reply(`⛔ Has alcanzado el límite de sesión${resetInfo ? `. Se resetea a las ${resetInfo}` : ''}. No puedo procesar mensajes hasta entonces.`);
+      return;
+    }
+
+    // Detect context window exhaustion (process exits with code 1 after long sessions)
     if (errMsg.includes('exited with code 1')) {
       const usage = lastUsage.get(chatIdStr);
       const contextSize = usage?.lastCallInputTokens || usage?.lastCallCacheRead || 0;
@@ -924,6 +1006,7 @@ export function createBot(): Bot {
     { command: 'respin', description: 'Reload recent context' },
     { command: 'voice', description: 'Toggle voice mode on/off' },
     { command: 'model', description: 'Switch model (opus/sonnet/haiku/fable)' },
+    { command: 'effort', description: 'Set effort level (low/medium/high/max)' },
     { command: 'memory', description: 'View recent memories' },
     { command: 'forget', description: 'Clear session' },
     { command: 'wa', description: 'Recent WhatsApp messages' },
@@ -950,6 +1033,7 @@ export function createBot(): Bot {
       '/respin — Reload recent context\n' +
       '/voice — Toggle voice mode on/off\n' +
       '/model — Switch model (opus/sonnet/haiku/fable)\n' +
+      '/effort — Set effort level (low/medium/high/max, max = Ultracode)\n' +
       '/memory — View recent memories\n' +
       '/forget — Clear session\n' +
       '/wa — WhatsApp messages\n' +
@@ -1143,6 +1227,36 @@ export function createBot(): Bot {
     clearSession(chatIdStr, AGENT_ID);
     sessionBaseline.delete(chatIdStr);
     await ctx.reply(`Model changed: ${arg} (${modelId}). Session cleared.`);
+  });
+
+  // /effort — set effort level for this chat (low, medium, high, max/ultracode)
+  bot.command('effort', async (ctx) => {
+    if (await replyIfLocked(ctx)) return;
+    const chatIdStr = ctx.chat!.id.toString();
+    const arg = ctx.match?.trim().toLowerCase();
+
+    if (!arg) {
+      const current = chatEffortOverride.get(chatIdStr) ?? 'default (model decides)';
+      await ctx.reply(
+        `Current effort: ${current}\nAvailable: low, medium, high, max (ultracode)\n\nUsage: /effort max`,
+      );
+      return;
+    }
+
+    if (arg === 'reset' || arg === 'default') {
+      chatEffortOverride.delete(chatIdStr);
+      await ctx.reply('Effort reset to model default.');
+      return;
+    }
+
+    const level = EFFORT_ALIASES[arg];
+    if (!level) {
+      await ctx.reply(`Unknown effort: ${arg}\nAvailable: low, medium, high, max (ultracode)`);
+      return;
+    }
+
+    chatEffortOverride.set(chatIdStr, level);
+    await ctx.reply(`Effort set to ${level}${arg === 'ultracode' ? ' (Ultracode)' : ''}. Applies from the next message, no session reset needed.`);
   });
 
   // /memory — show recent memories for this chat
@@ -1360,7 +1474,7 @@ export function createBot(): Bot {
   });
 
   // Text messages — and any slash commands not owned by this bot (skills, e.g. /todo /gmail)
-  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status']);
+  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/effort', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status']);
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
     const chatIdStr = ctx.chat!.id.toString();
@@ -1736,7 +1850,7 @@ async function processDashboardMessage(
       sessionId,
       () => {}, // no typing action for dashboard
       onProgress,
-      agentDefaultModel ?? 'claude-opus-4-7',
+      agentDefaultModel ?? 'claude-opus-5-5',
       abortCtrl,
       undefined, // no streaming for dashboard
       agentMcpAllowlist,

@@ -180,6 +180,7 @@ export async function runAgent(
   abortController?: AbortController,
   onStreamText?: (accumulatedText: string) => void,
   mcpAllowlist?: string[],
+  effort?: 'low' | 'medium' | 'high' | 'max',
 ): Promise<AgentResult> {
   // Read secrets from .env without polluting process.env.
   // CLAUDE_CODE_OAUTH_TOKEN is optional — the subprocess finds auth via ~/.claude/
@@ -249,6 +250,10 @@ export async function runAgent(
 
         // Model override (e.g. 'claude-haiku-4-5', 'claude-sonnet-4-5')
         ...(model ? { model } : {}),
+
+        // Effort level ('low' | 'medium' | 'high' | 'max'). 'max' = Ultracode in
+        // the Claude Code UI. Only some models support it; SDK passes it through.
+        ...(effort ? { effort } : {}),
 
         // Abort support — signals the SDK to kill the subprocess
         ...(abortController ? { abortController } : {}),

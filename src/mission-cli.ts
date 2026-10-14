@@ -48,12 +48,18 @@ const priorityArg = priorityFlagIdx !== -1
   ? parseInt(process.argv[priorityFlagIdx + 1] ?? '0', 10)
   : 5;
 
+// Parse --model flag (per-task model override, e.g. --model opus)
+const modelFlagIdx = process.argv.indexOf('--model');
+const modelArg = modelFlagIdx !== -1
+  ? process.argv[modelFlagIdx + 1] ?? null
+  : null;
+
 // Who created this task
 const createdBy = process.env.CLAUDECLAW_AGENT_ID ?? 'main';
 
 // Clean argv: remove all flag pairs
 const flagIndices = new Set<number>();
-[agentFlagIdx, titleFlagIdx, statusFlagIdx, priorityFlagIdx].forEach(idx => {
+[agentFlagIdx, titleFlagIdx, statusFlagIdx, priorityFlagIdx, modelFlagIdx].forEach(idx => {
   if (idx !== -1) { flagIndices.add(idx); flagIndices.add(idx + 1); }
 });
 const cleanedArgv = process.argv.filter((_, i) => !flagIndices.has(i));
@@ -76,12 +82,13 @@ switch (command) {
     }
     const title = titleArg || prompt.slice(0, 60);
     const id = randomBytes(4).toString('hex');
-    createMissionTask(id, title, prompt, targetAgent ?? null, createdBy, priorityArg);
+    createMissionTask(id, title, prompt, targetAgent ?? null, createdBy, priorityArg, modelArg);
 
     console.log(`Mission task created: ${id}`);
     console.log(`  Title:    ${title}`);
     console.log(`  Agent:    ${targetAgent || 'unassigned (use dashboard to assign)'}`);
     console.log(`  Priority: ${priorityArg}`);
+    if (modelArg) console.log(`  Model:    ${modelArg}`);
     console.log(`  Prompt:   ${prompt.slice(0, 100)}${prompt.length > 100 ? '...' : ''}`);
     break;
   }

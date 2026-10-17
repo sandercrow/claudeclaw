@@ -889,6 +889,13 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
         sessionBaseline.delete(chatIdStr);
         await ctx.reply('Claude Code crashed (session or model issue). Session cleared — send your message again.');
       }
+    } else if (/No conversation found with session ID/i.test(errMsg)) {
+      // The session ID we stored points to a conversation Claude Code no longer has on disk
+      // (SDK upgrade, cleanup, manual deletion). Drop it and start fresh instead of failing forever.
+      logger.warn({ chatId: chatIdStr, errMsg }, 'Stored session not found by Claude Code; clearing it');
+      clearSession(chatIdStr, AGENT_ID);
+      sessionBaseline.delete(chatIdStr);
+      await ctx.reply('The stored session no longer exists. Session cleared, send your message again.');
     } else {
       await ctx.reply('Something went wrong. Check the logs and try again.');
     }

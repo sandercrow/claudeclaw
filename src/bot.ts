@@ -29,6 +29,7 @@ import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessa
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } from './memory.js';
 import { setHighImportanceCallback } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
+import { accountStatusText, autoFailoverEnabled, failover, setActiveAccount, setAutoFailover, ACCOUNTS } from './claude-account.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
 import { reapAgentSubprocesses } from './process-reaper.js';
 import { emitChatEvent, setProcessing, setActiveAbort, abortActiveQuery } from './state.js';
@@ -400,7 +401,7 @@ async function replyIfLocked(ctx: Context): Promise<boolean> {
  * @param forceVoiceReply  When true, always respond with audio (e.g. user sent a voice note).
  * @param skipLog  When true, skip logging this turn to conversation_log (used by /respin to avoid self-referential logging).
  */
-async function handleMessage(ctx: Context, message: string, forceVoiceReply = false, skipLog = false): Promise<void> {
+async function handleMessage(ctx: Context, message: string, forceVoiceReply = false, skipLog = false, isSessionRetry = false): Promise<void> {
   const chatId = ctx.chat!.id;
   const chatIdStr = chatId.toString();
 
@@ -831,6 +832,18 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       || errMsg.match(/rate limit/i)
       || errMsg.match(/too many requests/i);
     if (sessionLimitMatch) {
+      const resetInfoRaw = (sessionLimitMatch[1] ?? '').trim();
+      logger.warn({ chatId: chatIdStr, errMsg }, 'Session/rate limit hit');
+      if (autoFailoverEnabled() && !isSessionRetry) {
+        const sw = failover(resetInfoRaw);
+        if (sw) {
+          await ctx.reply('⛔ Límite de uso en la cuenta ' + (sw.from === 'lc' || sw.from === 'iw' ? ACCOUNTS[sw.from].label : sw.from)
+            + (resetInfoRaw ? ' (se reinicia a las ' + resetInfoRaw + ')' : '')
+            + '. Cambio a ' + ACCOUNTS[sw.to].label + ' y reintento tu mensaje.');
+          messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, message, forceVoiceReply, skipLog, true));
+          return;
+        }
+      }
       const resetInfo = sessionLimitMatch[1] ?? '';
       logger.warn({ chatId: chatIdStr, errMsg }, 'Session/rate limit hit');
       await ctx.reply(`⛔ Has alcanzado el límite de sesión${resetInfo ? `. Se resetea a las ${resetInfo}` : ''}. No puedo procesar mensajes hasta entonces.`);
@@ -1398,6 +1411,28 @@ export function createBot(): Bot {
   });
 
   // /stop — interrupt the current agent query
+  // ── /cuenta: switch the Claude account used by the agent subprocess ──
+  const cuentaHandler = async (ctx: Context) => {
+    if (!isAuthorised(ctx.chat!.id)) return;
+    const arg = ((ctx.match as string | undefined) ?? '').trim().toLowerCase();
+    try {
+      if (arg === 'lc' || arg === 'iw') {
+        const label = setActiveAccount(arg);
+        await ctx.reply('Cuenta activa: ' + label + '. Aplica al siguiente mensaje, sin reinicio.');
+      } else if (arg.startsWith('auto')) {
+        const on = !/off|0|false/.test(arg);
+        setAutoFailover(on);
+        await ctx.reply('Failover automático: ' + (on ? 'on' : 'off'));
+      } else {
+        await ctx.reply(accountStatusText());
+      }
+    } catch (err) {
+      await ctx.reply('No se pudo cambiar: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+  bot.command('cuenta', cuentaHandler);
+  bot.command('account', cuentaHandler);
+
   bot.command('stop', async (ctx) => {
     if (!isAuthorised(ctx.chat!.id)) return;
     const chatIdStr = ctx.chat!.id.toString();

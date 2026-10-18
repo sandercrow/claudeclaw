@@ -13,6 +13,7 @@ import {
   resetStuckMissionTasks,
 } from './db.js';
 import { logger } from './logger.js';
+import { autoFailoverEnabled, failover, ACCOUNTS } from './claude-account.js';
 import { messageQueue } from './message-queue.js';
 import { runAgent } from './agent.js';
 import { formatForTelegram, splitMessage } from './bot.js';
@@ -208,6 +209,16 @@ async function runDueMissionTasks(): Promise<void> {
     } catch (err) {
       clearTimeout(timeout);
       const errMsg = err instanceof Error ? err.message : String(err);
+      const limitMatch = errMsg.match(/session limit.*resets?\s+(.+)/i) || errMsg.match(/usage limit.*resets?\s+(.+)/i) || errMsg.match(/rate limit/i);
+      if (limitMatch && autoFailoverEnabled()) {
+        const sw = failover((limitMatch[1] ?? '').trim());
+        if (sw) {
+          resetStuckMissionTasks(schedulerAgentId); // back to 'queued'; picked up right away in finally
+          logger.warn({ missionId: mission.id, to: sw.to }, 'Mission hit account limit; switched account and requeued');
+          try { await sender('⛔ Límite de uso en la cuenta ' + (sw.from === 'lc' || sw.from === 'iw' ? ACCOUNTS[sw.from].label : sw.from) + '. Cambio a ' + ACCOUNTS[sw.to].label + ' y relanzo la misión "' + mission.title + '".'); } catch {}
+          return;
+        }
+      }
       completeMissionTask(mission.id, null, 'failed', errMsg.slice(0, 500));
       logger.error({ err, missionId: mission.id }, 'Mission task failed');
     } finally {

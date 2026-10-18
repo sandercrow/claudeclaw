@@ -15,6 +15,7 @@ import { reembedStaleVectors, runDecaySweep } from './memory.js';
 import { initOAuthHealthCheck } from './oauth-health.js';
 import { initOrchestrator } from './orchestrator.js';
 import { initScheduler } from './scheduler.js';
+import { maybeReturnToPreferred, ACCOUNTS } from './claude-account.js';
 import { setTelegramConnected, setBotInfo } from './state.js';
 
 // Parse --agent flag
@@ -180,6 +181,18 @@ async function main(): Promise<void> {
   cleanupOldUploads();
 
   const bot = createBot();
+  // Return to the preferred Claude account once its session limit has reset.
+  setInterval(() => {
+    try {
+      const back = maybeReturnToPreferred();
+      if (back) {
+        void bot.api.sendMessage(PRIMARY_CHAT_ID, '↩️ Cuota de ' + ACCOUNTS[back].label + ' restablecida: vuelvo a usarla.').catch(() => {});
+      }
+    } catch (err) {
+      logger.error({ err }, 'return-to-preferred check failed');
+    }
+  }, 60_000);
+
 
   // Dashboard only runs in the main bot process
   if (AGENT_ID === 'main') {

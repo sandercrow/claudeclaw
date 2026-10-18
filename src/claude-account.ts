@@ -23,8 +23,16 @@ export const ACCOUNTS: Record<AccountKey, { label: string; envKey: string }> = {
 };
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 
-/** Account → epoch ms until which it is considered exhausted (session limit). */
+/** Account → epoch ms until which it is considered exhausted (session limit). Persisted across restarts. */
+const STATE_PATH = path.resolve(process.cwd(), 'store', 'claude-account-state.json');
 const exhaustedUntil = new Map<AccountKey, number>();
+try {
+  const saved = JSON.parse(fs.readFileSync(STATE_PATH, 'utf-8')) as Record<string, number>;
+  for (const [k, v] of Object.entries(saved)) if ((k === 'lc' || k === 'iw') && v > Date.now()) exhaustedUntil.set(k, v);
+} catch { /* no state yet */ }
+function saveState(): void {
+  try { fs.writeFileSync(STATE_PATH, JSON.stringify(Object.fromEntries(exhaustedUntil))); } catch { /* best effort */ }
+}
 let autoFailoverOverride: boolean | null = null;
 
 function readEnv(): Map<string, string> {
@@ -99,10 +107,11 @@ export function parseResetTime(text: string | undefined): number {
 
 export function markExhausted(key: AccountKey, resetText?: string): void {
   exhaustedUntil.set(key, parseResetTime(resetText));
+  saveState();
 }
 export function isExhausted(key: AccountKey): boolean {
   const until = exhaustedUntil.get(key) ?? 0;
-  if (until <= Date.now()) { exhaustedUntil.delete(key); return false; }
+  if (until <= Date.now()) { exhaustedUntil.delete(key); saveState(); return false; }
   return true;
 }
 

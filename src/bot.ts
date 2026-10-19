@@ -540,7 +540,10 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     let lastToolNotifyTime = 0;
     let lastToolDesc = '';
     const TOOL_NOTIFY_INTERVAL_MS = 30_000;
-    const progressMsgIds: number[] = [];
+    // Declared outside the try: a query that throws must not leave its timer armed,
+  // or it fires minutes later and aborts an unrelated query in this chat.
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const progressMsgIds: number[] = [];
 
     const trackProgressMsg = (promise: Promise<{ message_id: number }>) => {
       promise.then((sent) => progressMsgIds.push(sent.message_id)).catch(() => {});
@@ -572,7 +575,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     setActiveAbort(chatIdStr, abortCtrl);
 
     // Auto-abort if the agent runs too long (prevents runaway commands from blocking the bot)
-    const timeoutId = setTimeout(() => {
+    timeoutId = setTimeout(() => {
       logger.warn({ chatId: chatIdStr, timeoutMs: AGENT_TIMEOUT_MS }, 'Agent query timed out, aborting');
       abortCtrl.abort();
       // The abort alone can't reap a stuck root-owned child (e.g. `sudo docker logs -f`),
@@ -820,6 +823,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
 
     setProcessing(chatIdStr, false);
   } catch (err) {
+    clearTimeout(timeoutId);
     clearInterval(typingInterval);
     setActiveAbort(chatIdStr, null);
     setProcessing(chatIdStr, false);

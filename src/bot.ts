@@ -534,16 +534,17 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
 
   setProcessing(chatIdStr, true);
 
+  // Declared outside the try: a query that throws must not leave its timer armed,
+  // or it fires minutes later and aborts an unrelated query in this chat.
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
   try {
     // Progress callback: surface agent activity to Telegram + SSE.
     // Tool activity is throttled to one Telegram update per 30s to avoid spam.
     let lastToolNotifyTime = 0;
     let lastToolDesc = '';
     const TOOL_NOTIFY_INTERVAL_MS = 30_000;
-    // Declared outside the try: a query that throws must not leave its timer armed,
-  // or it fires minutes later and aborts an unrelated query in this chat.
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const progressMsgIds: number[] = [];
+    const progressMsgIds: number[] = [];
 
     const trackProgressMsg = (promise: Promise<{ message_id: number }>) => {
       promise.then((sent) => progressMsgIds.push(sent.message_id)).catch(() => {});

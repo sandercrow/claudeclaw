@@ -209,9 +209,9 @@ async function runDueMissionTasks(): Promise<void> {
     } catch (err) {
       clearTimeout(timeout);
       const errMsg = err instanceof Error ? err.message : String(err);
-      const limitMatch = errMsg.match(/session limit.*resets?\s+(.+)/i) || errMsg.match(/usage limit.*resets?\s+(.+)/i) || errMsg.match(/rate limit/i);
+      const limitMatch = errMsg.match(/session limit.*resets?\s+(.+)/i) || errMsg.match(/usage limit.*resets?\s+(.+)/i) || errMsg.match(/out of usage credits/i) || errMsg.match(/rate limit/i);
       if (limitMatch && autoFailoverEnabled()) {
-        const sw = failover((limitMatch[1] ?? '').trim());
+        const sw = failover((limitMatch[1] ?? '').trim() || errMsg);
         if (sw) {
           resetStuckMissionTasks(schedulerAgentId); // back to 'queued'; picked up right away in finally
           logger.warn({ missionId: mission.id, to: sw.to }, 'Mission hit account limit; switched account and requeued');

@@ -94,7 +94,9 @@ export function setAutoFailover(on: boolean): void { autoFailoverOverride = on; 
 export function parseResetTime(text: string | undefined): number {
   const now = Date.now();
   const m = text?.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
-  if (!m) return now + 60 * 60_000;
+  // "out of usage credits" gives no reset time: the plan's credits are gone until a top-up
+  // or the weekly reset, so keep that account parked for a while instead of retrying every hour.
+  if (!m) return now + (/credits/i.test(text ?? '') ? 6 : 1) * 60 * 60_000;
   let h = parseInt(m[1], 10); const min = parseInt(m[2], 10);
   const ap = m[3]?.toLowerCase();
   if (ap === 'pm' && h < 12) h += 12;

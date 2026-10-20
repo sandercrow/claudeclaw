@@ -834,13 +834,14 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
 
     // Detect session/rate limit from the SDK (new SDK 0.3.x throws descriptive errors)
     const sessionLimitMatch = errMsg.match(/session limit.*resets?\s+(.+)/i)
+      || errMsg.match(/out of usage credits/i)
       || errMsg.match(/rate limit/i)
       || errMsg.match(/too many requests/i);
     if (sessionLimitMatch) {
       const resetInfoRaw = (sessionLimitMatch[1] ?? '').trim();
       logger.warn({ chatId: chatIdStr, errMsg }, 'Session/rate limit hit');
       if (autoFailoverEnabled() && !isSessionRetry) {
-        const sw = failover(resetInfoRaw);
+        const sw = failover(resetInfoRaw || errMsg);
         if (sw) {
           await ctx.reply('⛔ Límite de uso en la cuenta ' + (sw.from === 'lc' || sw.from === 'iw' ? ACCOUNTS[sw.from].label : sw.from)
             + (resetInfoRaw ? ' (se reinicia a las ' + resetInfoRaw + ')' : '')

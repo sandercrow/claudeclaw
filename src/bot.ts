@@ -29,7 +29,7 @@ import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessa
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } from './memory.js';
 import { setHighImportanceCallback } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
-import { accountStatusText, autoFailoverEnabled, failover, setActiveAccount, setAutoFailover, ACCOUNTS } from './claude-account.js';
+import { accountStatusText, autoFailoverEnabled, failover, setActiveAccount, setAutoFailover, parkAccount, ACCOUNTS, type AccountKey } from './claude-account.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
 import { reapAgentSubprocesses } from './process-reaper.js';
 import { emitChatEvent, setProcessing, setActiveAbort, abortActiveQuery } from './state.js';
@@ -1422,9 +1422,15 @@ export function createBot(): Bot {
     if (!isAuthorised(ctx.chat!.id)) return;
     const arg = ((ctx.match as string | undefined) ?? '').trim().toLowerCase();
     try {
-      if (arg === 'lc' || arg === 'iw') {
-        const label = setActiveAccount(arg);
-        await ctx.reply('Cuenta activa: ' + label + '. Aplica al siguiente mensaje, sin reinicio.');
+      if (arg === 'lc' || arg === 'iw' || /^(lc|iw)\s+\d+h?$/.test(arg)) {
+        const [key, hrs] = arg.split(/\s+/) as [AccountKey, string | undefined];
+        const hours = hrs ? parseInt(hrs, 10) : 6;
+        const label = setActiveAccount(key);
+        // Park the account we are leaving so the automatic return to the preferred
+        // account does not flip us back a minute later.
+        const other: AccountKey = key === 'lc' ? 'iw' : 'lc';
+        parkAccount(other, hours);
+        await ctx.reply('Cuenta activa: ' + label + ' durante ' + hours + ' h (la otra queda aparcada). Aplica al siguiente mensaje, sin reinicio.');
       } else if (arg.startsWith('auto')) {
         const on = !/off|0|false/.test(arg);
         setAutoFailover(on);

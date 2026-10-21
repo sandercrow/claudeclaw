@@ -111,6 +111,12 @@ export function markExhausted(key: AccountKey, resetText?: string): void {
   exhaustedUntil.set(key, parseResetTime(resetText));
   saveState();
 }
+/** Park an account for a number of hours (manual switch away from it, or a limit with no reset time). */
+export function parkAccount(key: AccountKey, hours: number): void {
+  exhaustedUntil.set(key, Date.now() + hours * 60 * 60_000);
+  saveState();
+}
+
 export function isExhausted(key: AccountKey): boolean {
   const until = exhaustedUntil.get(key) ?? 0;
   if (until <= Date.now()) { exhaustedUntil.delete(key); saveState(); return false; }

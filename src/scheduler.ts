@@ -127,6 +127,17 @@ async function runDueTasks(): Promise<void> {
       } catch (err) {
         clearTimeout(timeout);
         const errMsg = err instanceof Error ? err.message : String(err);
+        const limitHit = /session limit|usage limit|out of usage credits|rate limit/i.test(errMsg);
+        if (limitHit && autoFailoverEnabled()) {
+          const sw = failover(errMsg);
+          if (sw) {
+            // Re-run on the next scheduler tick (60s) with the other account.
+            updateTaskAfterRun(task.id, Math.floor(Date.now() / 1000), 'account limit, switched to ' + sw.to + ', retrying', 'failed');
+            logger.warn({ taskId: task.id, to: sw.to }, 'Scheduled task hit account limit; switched account, retrying next tick');
+            try { await sender('⛔ Límite en la cuenta ' + (sw.from === 'lc' || sw.from === 'iw' ? ACCOUNTS[sw.from].label : sw.from) + '. Cambio a ' + ACCOUNTS[sw.to].label + ' y reintento la tarea programada en 1 min.'); } catch {}
+            return;
+          }
+        }
         updateTaskAfterRun(task.id, nextRun, errMsg.slice(0, 500), 'failed');
 
         logger.error({ err, taskId: task.id }, 'Scheduled task failed');
